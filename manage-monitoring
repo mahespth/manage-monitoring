@@ -1,0 +1,361 @@
+#!/bin/bash
+
+#     _________________________________________________
+#    //////////   AIXtreme Research Limited \\\\\\\\\\\\
+#    \_________________________________________________/
+#
+############################################################
+#   Project: Redhat-upgrade-project
+#  Customer: ARQ-WIN
+#   Created: 10/2018
+#
+# Authors: Steve Maher
+#
+# Ref: https://github.com/solarwinds/orionsdk-python
+# Ref: https://thwack.solarwinds.com/thread/115778
+# Ref: https://gist.github.com/cdown/1163649/8a35c36fdd24b373788a7057ed483a5bcd8cd43e
+# Ref: https://jqplay.org/
+# Ref: http://solarwinds.github.io/OrionSDK/schema/
+# Ref: 
+#   Request URL: http://orion/api2/tooltip/types/enabled/?null
+############################################################
+
+# .netrc !?
+############################################################
+function _create-netrc
+{
+	cat <<-EOF >${NETRC}
+		machine ${SWHOST}
+		login ${USERNAME}
+		password ${1}
+	EOF
+}
+
+# modified url encode to consider all args
+############################################################
+function _encode
+{
+	typeset    _input=$*
+	typeset    _length="${#_input}"
+	typeset -i _offset
+
+	for (( _offset = 0 ; _offset < _length ; _offset++ ))
+	do
+		_print_offset="${_input:_offset:1}"
+
+		case "${_print_offset}" in
+		 [a-zA-Z0-9.~_-]) 
+		 	printf "${_print_offset}"
+			;;
+		 ' ') 	printf "+"
+		 	;;
+		 *) 	printf '%%%X' "'${_print_offset}"
+		 	;;
+		esac
+	done
+}
+
+# 
+############################################################
+function _query 
+{
+	eval ${CURL_GET} ${CURL_AUTH} "${JSON_NODE}/Query?query=$( _encode $* )"
+}
+
+# Create a jq CSV, depends on well-formed jq input !
+############################################################
+function _jq-csv
+{
+	jq -r "$1 | @csv"
+}
+	
+# Status mapping 
+############################################################
+function _swStatusText
+{
+	# @@SGM we should really populate this from the table - it could change...
+	############################################################
+	swStatus=( 'Unknown' 'Up' 'Down' 'Warning' 'Shutdown' 'Testing' 'Dormant' 'Not Present' 'Lower Layer Down' 'Unmanaged' 'Unplugged' 'External' 'Unreachable' 'Undefined' 'Critical' 'Partly Available' 'Misconfigured' 'Could Not Poll' 'Undefined' 'Unconfirmed' 'Undefined' 'Undefined' 'Active' 'Undefined' 'Inactive' 'Expired' 'Monitoring Disabled' 'Disabled' 'Not Licensed' 'Other' 'Not Running' )
+
+	if [[ $1 == "-" ]]
+	then
+		for i in ${!swStatus[*]}
+		do
+			if [[ ${swStatus[${i}]^^} == ${2^^} ]] 
+			then
+				printf "%d" "${i}"
+				break
+			fi
+		done
+
+		return
+	else
+		[[ $1 =~ ^[0-9]+ ]] && printf "%s" "${swStatus[$1]}"
+	fi
+}
+
+# Get the NodeID from a hostname (SQL wildcarded - will return multiple IDs)
+############################################################
+function _NodeID
+{
+	_query "Select Uri From Orion.Nodes Where NodeName Like '$1'" \
+	| jq -r '.results[].Uri' \
+	| awk -F"=" '{ printf "%s "$2 }'
+}
+
+# List all the "nodes" in solarwinds and their status
+# or - select a given status..
+############################################################
+function _listAll
+{
+	if [[ -n $1 ]]
+	then
+		if [[ $1 =~ ^[0-9] ]]
+		then
+			whereClause=" Where NodeID='$1'"
+		else
+			whereClause=" Where Status='$( _swStatusText - $1 )'"
+		fi
+	fi
+
+    if [[ -n ${customProperties} ]]
+    then
+
+	    _query "SELECT NodeID,Caption,MachineType,LastBoot,Status FROM Orion.Nodes${whereClause}" \
+	    | _jq-csv ".results[] | [ .NodeID, .Caption, .MachineType, .LastBoot, .Status ]" \
+    	|  while IFS=, read -r NodeID Caption MachineType LastBoot Status
+        do
+    		Status=$( _swStatusText ${Status} )
+    		printf '%-30s %30s %30s %10s\n' "${Caption}" "${MachineType}" "${LastBoot}" "${Status}"
+
+	        _query "SELECT * FROM Orion.Nodes LEFT JOIN Orion.NodesCustomProperties ON Orion.NodesCustomProperties.NodeID=Orion.Nodes.NodeID WHERE Orion.Nodes.NodeID='${NodeID}' " \
+	        #| _jq-csv ".results[] | [ .DisplayName, .Description ]" 
+            # @@SGM - need to do a join.
+            exit
+        done
+    else
+	    _query "SELECT Caption,MachineType,LastBoot,Status FROM Orion.Nodes${whereClause}" \
+    	| _jq-csv ".results[] | [ .Caption, .MachineType, .LastBoot, .Status ]" \
+    	|  while IFS=, read -r Caption MachineType LastBoot Status
+    	do
+    		Status=$( _swStatusText ${Status} )
+    
+    		printf '%-30s %30s %30s %10s\n' "${Caption}" "${MachineType}" "${LastBoot}" "${Status}"
+    	done
+    fi
+
+}
+
+#
+############################################################
+function f_usage
+{
+	echo "usage: ${ProgName} [ [-S [state] | -l | -L | [-t hours] [-s|-m|-u]] [node] [node] ...."
+	echo "		-S 	known state, ie Up, Down, Disabled, Unmanaged]"
+	echo "		-l	List all known nodes and states"
+	echo "		-L	List all Unmanaged nodes"
+	echo ""
+	echo "		-s [nodes..] Status of nodes"
+	echo "		-r [nodes..] Remanage nodes"
+	echo "		-u [nodes..] Unmanage nodes"
+	echo "		-t [hours]   number of hours before monitoring is remanaged"
+	echo "		-T [%m-%d-%Y %r] exact time when monitoring will remanage"
+	echo ""
+	echo "		Note: nodenames are SQL like statements so % for wildcards"
+	echo ""
+	echo "	examples:"
+	echo "		${ProgName} -S Down"
+	echo "		${ProgName} -u uhmt% -t 12"
+	echo "		${ProgName} -r uhmt%"
+	echo "		${ProgName} -L"
+	echo ""
+}
+
+set -o noglob
+
+typeset    ProgName=$( basename $0 )
+typeset    DirName=$( dirname $0 ); [[ $DirName == "." ]] && DirName=$PWD
+typeset    TTY=$( tty -s && tty )
+
+typeset -i ERC
+typeset -i TERC
+
+typeset    IS_CYGWIN
+typeset    NETRC=~/.${ProgName}-netrc
+typeset    CURL="curl -s -k"
+typeset    CURL_CONTENT="-H 'Content-Type: application/json'"
+typeset    CURL_GET="${CURL}  ${CURL_CONTENT} -X GET"
+typeset    CURL_POST="${CURL} ${CURL_CONTENT} -X POST"
+
+#typeset    SWHOST="paq-crw-mon01"
+typeset    SWHOST="orion"
+typeset    JSON_NODE="https://${SWHOST}:17778/SolarWinds/InformationService/v3/Json"
+#typeset    JSON_NODE="http://${SWHOST}/SolarWinds/InformationService/v3/Json"
+
+typeset    TMPDIR=${TMPDIR:-"/tmp"}
+typeset    JSON_POST="${TMPDIR}/${ProgName}.${USER}.dat"
+typeset    PASSWORD="${SWIN_PWD}"
+
+#if ! eval date >/dev/null 2>&1
+#then
+#    alias date='/bin/busybox.exe date'
+#fi
+
+# Is this a cygwin server
+############################################################
+if uname -s | grep -q "CYGWIN"
+then
+	IS_CYGWIN=true
+	JSON_POST="${TMPDIR}/solar-winds-node-data.dat"
+fi
+
+if [[ -s ${NETRC} ]]
+then
+	CURL_AUTH="-n --netrc-file ${NETRC}"
+
+elif [[ -z ${PASSWORD} ]]
+then
+	if [[ -z "${TTY}${PASSSWORD}" ]]
+	then
+		echo "[E] Password is missing and no TTY for input."
+		exit 1
+	fi
+
+	echo "[I] Password required for ${USERNAME} @ ${JSON_NODE}"
+
+	echo -e "[P] Enter Password :\c"
+	stty -echo
+	read PASSWORD
+	stty echo
+
+    echo ""
+
+	#_create-netrc ${PASSWORD}
+
+	CURL_AUTH="-u ${USERNAME}:${PASSWORD}"
+else
+	CURL_AUTH="-u ${USERNAME}:${PASSWORD}"
+fi
+
+while getopts :ht:T:sCulLrS: OPT
+do
+	case $OPT in
+	 s)	MONITOR_MODE="status"
+	 	;;
+	 u)	MONITOR_MODE="Unmanage"
+		dateStart=$( TZ=+1 date +%m"-"%d"-"%Y" "%r )
+  		  dateEnd=$( TZ=-4 date +%m"-"%d"-"%Y" "%r )
+		;;
+	 r)	MONITOR_MODE="Remanage"
+		dateStart=$( TZ=+1 date +%m"-"%d"-"%Y" "%r )
+  		  dateEnd=$( TZ=-4 date +%m"-"%d"-21"%g" "%r )
+		;;
+	 T)	dateEnd=$( date -d "${OPTARG}" +%m"-"%d"-"%Y" "%r )
+
+	 	if [[ -z $dateEnd ]]
+		then
+			echo "[E] Invalid input date."
+			exit 1
+        else
+            echo "[I] End Date ${dateEnd}"
+		fi
+	 	;;
+	 t)	if [[ ${OPTARG} =~ !/[0-9]*/ ]]
+	 	then
+			echo "usage error: -t flag requires a number of whole hours"
+			exit 1
+		fi
+	 	
+  		dateEnd=$( TZ=-${OPTARG} date +%m"-"%d"-"%Y" "%r )
+	 	;;
+	 l)	_listAll
+	 	exit $?
+		;;
+	 L)	_listAll unmanaged
+	 	exit $?
+		;;
+	 S)	_listAll ${OPTARG}
+	 	exit $?
+	 	;;
+     C) customProperties=true
+        ;;
+	 [Hh]*) f_usage
+		exit 
+		;;
+	 *)	echo "usage error: unknown flag" >&2
+	 	exit 1
+	 	;;
+	esac
+done
+
+if [[ -z ${MONITOR_MODE} ]]
+then
+	 echo "usage error: you must specify -l (list) -u (unmanage) or -r (remanage)" >&2
+	 f_usage
+	 exit 1
+fi
+
+shift $(( $OPTIND-1 ))
+
+if [[ -z $1 ]]
+then
+	echo "usage error: you must pass node names."
+	exit 1
+fi
+
+for nodeName in $*
+do
+	echo "[I] Searching for NodeID for ${nodeName}"
+
+	NodeIDs=$( _NodeID ${nodeName} )
+
+	if [[ -z "${NodeIDs}" ]]
+	then
+		echo "[E] Could not find NodeID for ${nodeName}."
+		let TERC+=1
+		continue
+	fi
+
+	for NodeID in ${NodeIDs}
+	do
+		if [[ ${MONITOR_MODE} == "status" ]]
+		then
+			_listAll ${NodeID}
+		else
+			echo "[I] $1 NodeID=${NodeID} ${MONITOR_MODE}"
+
+			# example output:
+			############################################################
+			# ["N:${NODEID}","10-23-2018 04:10:00 PM","10-23-2019 06:00:00 PM","false"]
+			############################################################
+			cat <<-EOF >${JSON_POST}
+				["N:${NodeID}","${dateStart}","${dateEnd}","false"]
+			EOF
+		
+			eval ${CURL_POST} ${CURL_AUTH} -d@"${JSON_POST}" "${JSON_NODE}/Invoke/Orion.Nodes/${MONITOR_MODE}" \
+			| grep -qw null
+		
+			ERC=$?
+		
+			if (( ERC ))
+			then
+				echo "[E] Error in ${MONITOR_MODE} node."
+				let TERC+=ERC
+			else
+	 			if [[ $MONITOR_MODE == "Unmanage" ]] 
+				then
+					echo "[I] Monitoring will Remanage at ${dateEnd}."
+				else
+					echo "[I] Done."
+				fi
+			fi 
+		fi
+	done
+done
+
+[[ -e ${JSON_POST} ]] && \
+	rm -f ${JSON_POST}
+
+# The end..
+############################################################
+exit ${TERC}
