@@ -6,8 +6,10 @@
 #
 ############################################################
 #   Project: Redhat-upgrade-project
-#  Customer: ARQ-WIN
+#  Customer: 
 #   Created: 10/2018
+#   Requires: curl / jq
+#   Tested: cygwin on win10 & linux.
 #
 # Authors: Steve Maher
 #
@@ -17,10 +19,10 @@
 # Ref: https://jqplay.org/
 # Ref: http://solarwinds.github.io/OrionSDK/schema/
 # Ref: 
-#   Request URL: http://orion/api2/tooltip/types/enabled/?null
+#
 ############################################################
 
-# .netrc !?
+# .netrc !? - maybe not....
 ############################################################
 function _create-netrc
 {
@@ -31,7 +33,7 @@ function _create-netrc
 	EOF
 }
 
-# modified url encode to consider all args
+# url encode 
 ############################################################
 function _encode
 {
@@ -121,8 +123,8 @@ function _listAll
     if [[ -n ${customProperties} ]]
     then
 
-	    _query "SELECT NodeID,Caption,MachineType,LastBoot,Status FROM Orion.Nodes${whereClause}" \
-	    | _jq-csv ".results[] | [ .NodeID, .Caption, .MachineType, .LastBoot, .Status ]" \
+	_query "SELECT NodeID,Caption,MachineType,LastBoot,Status FROM Orion.Nodes${whereClause}" \
+	| _jq-csv ".results[] | [ .NodeID, .Caption, .MachineType, .LastBoot, .Status ]" \
     	|  while IFS=, read -r NodeID Caption MachineType LastBoot Status
         do
     		Status=$( _swStatusText ${Status} )
@@ -130,20 +132,18 @@ function _listAll
 
 	        _query "SELECT * FROM Orion.Nodes LEFT JOIN Orion.NodesCustomProperties ON Orion.NodesCustomProperties.NodeID=Orion.Nodes.NodeID WHERE Orion.Nodes.NodeID='${NodeID}' " \
 	        #| _jq-csv ".results[] | [ .DisplayName, .Description ]" 
-            # @@SGM - need to do a join.
+                # @@SGM - need to do a join of the custom fields
             exit
         done
     else
-	    _query "SELECT Caption,MachineType,LastBoot,Status FROM Orion.Nodes${whereClause}" \
+	_query "SELECT Caption,MachineType,LastBoot,Status FROM Orion.Nodes${whereClause}" \
     	| _jq-csv ".results[] | [ .Caption, .MachineType, .LastBoot, .Status ]" \
     	|  while IFS=, read -r Caption MachineType LastBoot Status
     	do
     		Status=$( _swStatusText ${Status} )
-    
     		printf '%-30s %30s %30s %10s\n' "${Caption}" "${MachineType}" "${LastBoot}" "${Status}"
     	done
     fi
-
 }
 
 #
@@ -187,8 +187,7 @@ typeset    CURL_CONTENT="-H 'Content-Type: application/json'"
 typeset    CURL_GET="${CURL}  ${CURL_CONTENT} -X GET"
 typeset    CURL_POST="${CURL} ${CURL_CONTENT} -X POST"
 
-#typeset    SWHOST="paq-crw-mon01"
-typeset    SWHOST="orion"
+typeset    SWHOST=${SWHOST:-"orion"}
 typeset    JSON_NODE="https://${SWHOST}:17778/SolarWinds/InformationService/v3/Json"
 #typeset    JSON_NODE="http://${SWHOST}/SolarWinds/InformationService/v3/Json"
 
